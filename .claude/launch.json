@@ -1,6 +1,7 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "web", "runtimeExecutable": "npx", "runtimeArgs": ["expo", "start", "--web", "--port", "8124", "--clear"], "port": 8124 }
+    { "name": "web", "runtimeExecutable": "npx", "runtimeArgs": ["expo", "start", "--web", "--port", "8124", "--clear"], "port": 8124 },
+    { "name": "web-cloud", "runtimeExecutable": "keyrun", "runtimeArgs": ["--", "npx", "expo", "start", "--web", "--port", "8125", "--clear"], "port": 8125 }
   ]
 }

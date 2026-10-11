@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { FamilyCard } from '@/components/family-card';
 import { Stepper, askConfirm } from '@/components/settings/common';
 import { ItemEditor, type EditKind } from '@/components/settings/item-editor';
 import { Btn3D, Card, SectionTitle, T, tap } from '@/components/ui';
@@ -69,6 +70,8 @@ export default function SettingsScreen() {
         <T size={14} color={C.textSoft} style={{ marginTop: 4 }}>
           這裡的規則全家共用，每位照顧者看到的都一樣。
         </T>
+
+        <FamilyCard />
 
         {sections.map((sec) => (
           <View key={sec.kind}>

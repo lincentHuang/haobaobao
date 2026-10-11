@@ -41,3 +41,12 @@ example
 # generated native folders
 /ios
 /android
+
+# keysave
+.keyrc
+.keyrc.*
+!.keyrc.example
+.env
+.env.*
+*.pem
+*.p12

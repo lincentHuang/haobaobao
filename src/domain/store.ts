@@ -28,12 +28,26 @@ type Collections = {
 };
 export type CollectionKey = keyof Collections;
 
+/** 全家共用、要同步到雲端的設定 */
+export type FamilyConfig = Collections & { penalty: PenaltySettings };
+
+export interface Family {
+  id: string;
+  name: string;
+  inviteCode: string;
+}
+
 interface State extends Collections {
   penalty: PenaltySettings;
   events: LogEvent[];
   /** 這台裝置目前選的小孩 / 照顧者（每台裝置各自記） */
   currentChildId: Id;
   currentCaregiverId: Id;
+
+  /** 雲端同步：加入的家庭、尚未上傳的事件 id、設定是否有未上傳的修改 */
+  family: Family | null;
+  outbox: Id[];
+  configDirty: boolean;
 
   setCurrentChild: (id: Id) => void;
   setCurrentCaregiver: (id: Id) => void;
@@ -52,7 +66,22 @@ interface State extends Collections {
   redeem: (reward: Reward) => void;
   undo: (eventId: Id) => void;
   resetAll: () => void;
+
+  setFamily: (f: Family | null) => void;
+  /** 雲端資料進來：設定整份取代（本機有未上傳修改時略過），事件依 id 合併 */
+  applyRemote: (r: { config?: FamilyConfig; events?: LogEvent[] }) => void;
+  markPushed: (eventIds: Id[], config: boolean) => void;
 }
+
+export const pickConfig = (s: FamilyConfig): FamilyConfig => ({
+  children: s.children,
+  caregivers: s.caregivers,
+  good: s.good,
+  bad: s.bad,
+  rewards: s.rewards,
+  routines: s.routines,
+  penalty: s.penalty,
+});
 
 const initial = {
   children: seed.seedChildren,
@@ -63,8 +92,11 @@ const initial = {
   routines: seed.seedRoutines,
   penalty: seed.seedPenalty,
   events: [] as LogEvent[],
+  family: null as Family | null,
   currentChildId: seed.seedChildren[0].id,
   currentCaregiverId: seed.seedCaregivers[0].id,
+  outbox: [] as Id[],
+  configDirty: false,
 };
 
 export const useStore = create<State>()(
@@ -79,7 +111,7 @@ export const useStore = create<State>()(
           caregiverId: currentCaregiverId,
           ...e,
         };
-        set((s) => ({ events: [...s.events, event] }));
+        set((s) => ({ events: [...s.events, event], outbox: [...s.outbox, event.id] }));
         return event;
       };
 
@@ -95,17 +127,18 @@ export const useStore = create<State>()(
             const exists = list.some((x) => x.id === item.id);
             return {
               [key]: exists ? list.map((x) => (x.id === item.id ? item : x)) : [...list, item],
+              configDirty: true,
             } as Partial<State>;
           }),
         remove: (key, id) =>
           set((s) => {
-            const next = { [key]: (s[key] as { id: Id }[]).filter((x) => x.id !== id) } as Partial<State>;
+            const next = { [key]: (s[key] as { id: Id }[]).filter((x) => x.id !== id), configDirty: true } as Partial<State>;
             if (key === 'children' && s.currentChildId === id) next.currentChildId = s.children.find((c) => c.id !== id)?.id ?? '';
             if (key === 'caregivers' && s.currentCaregiverId === id)
               next.currentCaregiverId = s.caregivers.find((c) => c.id !== id)?.id ?? '';
             return next;
           }),
-        setPenalty: (p) => set((s) => ({ penalty: { ...s.penalty, ...p } })),
+        setPenalty: (p) => set((s) => ({ penalty: { ...s.penalty, ...p }, configDirty: true })),
 
         giveSticker: (good) =>
           log({ type: 'sticker', refId: good.id, stickers: good.stickers, label: good.title, emoji: good.emoji }),
@@ -127,13 +160,14 @@ export const useStore = create<State>()(
             // 取消今天這一步：把今天對應的事件標成撤銷
             const from = new Date().setHours(0, 0, 0, 0);
             const { currentChildId } = get();
-            set((s) => ({
-              events: s.events.map((e) =>
-                e.childId === currentChildId && e.type === 'routine_step' && e.refId === routine.id && e.stepId === stepId && e.at >= from
-                  ? { ...e, undone: true }
-                  : e,
-              ),
-            }));
+            set((s) => {
+              const hit = (e: LogEvent) =>
+                !e.undone && e.childId === currentChildId && e.type === 'routine_step' && e.refId === routine.id && e.stepId === stepId && e.at >= from;
+              return {
+                events: s.events.map((e) => (hit(e) ? { ...e, undone: true } : e)),
+                outbox: [...s.outbox, ...s.events.filter(hit).map((e) => e.id)],
+              };
+            });
           }
         },
         completeRoutine: (routine) =>
@@ -147,8 +181,40 @@ export const useStore = create<State>()(
         redeem: (reward) =>
           log({ type: 'redeem', refId: reward.id, stickers: -reward.cost, label: reward.title, emoji: reward.emoji }),
 
-        undo: (eventId) => set((s) => ({ events: s.events.map((e) => (e.id === eventId ? { ...e, undone: true } : e)) })),
-        resetAll: () => set({ ...initial }),
+        undo: (eventId) =>
+          set((s) => ({
+            events: s.events.map((e) => (e.id === eventId ? { ...e, undone: true } : e)),
+            outbox: [...s.outbox, eventId],
+          })),
+        // 重設只動本機設定與紀錄；已加入的家庭保留，設定會再上傳成預設值
+        resetAll: () => set((s) => ({ ...initial, family: s.family, configDirty: !!s.family })),
+
+        setFamily: (family) => set({ family }),
+        applyRemote: ({ config, events }) =>
+          set((s) => {
+            const next: Partial<State> = {};
+            if (config && !s.configDirty) {
+              Object.assign(next, config);
+              if (!config.children.some((c) => c.id === s.currentChildId)) next.currentChildId = config.children[0]?.id ?? '';
+              if (!config.caregivers.some((c) => c.id === s.currentCaregiverId))
+                next.currentCaregiverId = config.caregivers[0]?.id ?? '';
+            }
+            if (events?.length) {
+              const byId = new Map(s.events.map((e) => [e.id, e]));
+              for (const e of events) {
+                const local = byId.get(e.id);
+                // 撤銷是單向的：任一邊撤銷就算撤銷
+                byId.set(e.id, local ? { ...e, undone: local.undone || e.undone } : e);
+              }
+              next.events = [...byId.values()].sort((a, b) => a.at - b.at);
+            }
+            return next;
+          }),
+        markPushed: (eventIds, config) =>
+          set((s) => {
+            const done = new Set(eventIds);
+            return { outbox: s.outbox.filter((id) => !done.has(id)), ...(config ? { configDirty: false } : {}) };
+          }),
       };
     },
     {
